@@ -1,32 +1,28 @@
-/**
- * @flow
- */
-type Options = {
-  url: ?string;
-  query: ?string;
-  variables: ?Object;
-  result?: Object;
-};
-type GetOptions = (ctx: Object) => Promise<Options>;
-
 // Current latest version of GraphiQL
-const GRAPHIQL_VERSION = '0.4.4';
+const GRAPHIQL_VERSION = "0.11.3";
 
-export default function createMiddleware(getOptionsAsync: ?GetOptions) {
-  return async function middleware(ctx) {
-    let options = getDefaultOptions(ctx);
-    if (getOptionsAsync) {
-      Object.assign(options, await getOptionsAsync(ctx));
+export default function createMiddleware(getOptions) {
+  return async function middleware() {
+    const options = getDefaultOptions(this);
+    let overrides = {};
+    if (typeof getOptions === "function") {
+      overrides = getOptions(this);
+    } else if (typeof getOptions === "object") {
+      overrides = getOptions;
     }
+    Object.assign(
+      options,
+      typeof overrides.then === "function" ? await overrides : overrides
+    );
 
-    ctx.body = renderHtml(options);
-    ctx.type = 'text/html';
+    this.body = renderHtml(options);
+    this.type = "text/html";
   };
 }
 
 function getDefaultOptions(ctx) {
-  let body = ctx.request.body || {};
-  let query = body.query || ctx.query.query;
+  const body = ctx.request.body || {};
+  const query = body.query || ctx.query.query;
 
   let variables;
   let variablesString = body.variables || ctx.query.variables;
@@ -40,66 +36,84 @@ function getDefaultOptions(ctx) {
     result = JSON.parse(resultString);
   } catch (e) {}
 
-  return { query, variables, result };
+  const css = `//cdn.jsdelivr.net/graphiql/${GRAPHIQL_VERSION}/graphiql.css`;
+  const js = `//cdn.jsdelivr.net/graphiql/${GRAPHIQL_VERSION}/graphiql.min.js`;
+  const url = "/graphql";
+
+  return { query, variables, result, css, js, url };
 }
 
 /**
  * See express-graphql for the original implementation
  */
-function renderHtml(options: Options): string {
-  let url = options.url || '';
-  let queryString = options.query;
-  let variablesString = options.variables ?
-    JSON.stringify(options.variables, null, 2) :
-    null;
-  let resultString = options.result ?
-    JSON.stringify(options.result, null, 2) :
-    null;
+function renderHtml(options) {
+  const queryString = options.query;
+  const variablesString = options.variables
+    ? JSON.stringify(options.variables, null, 2)
+    : null;
+  const resultString = options.result
+    ? JSON.stringify(options.result, null, 2)
+    : null;
 
   // How to Meet Ladies
-  return (
-`<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html>
 <head>
-  <link href="//cdn.jsdelivr.net/graphiql/${GRAPHIQL_VERSION}/graphiql.css" rel="stylesheet" />
+  <meta charset="utf-8" />
+  <title>GraphiQL</title>
+  <meta name="robots" content="noindex" />
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      width: 100%;
+    }
+    #content {
+      height: 100%
+    }
+  </style>
+  <link href="${options.css}" rel="stylesheet" />
   <script src="//cdn.jsdelivr.net/fetch/0.9.0/fetch.min.js"></script>
-  <script src="//cdn.jsdelivr.net/react/0.14.2/react.min.js"></script>
-  <script src="//cdn.jsdelivr.net/react/0.14.2/react-dom.min.js"></script>
-  <script src="//cdn.jsdelivr.net/graphiql/${GRAPHIQL_VERSION}/graphiql.min.js"></script>
+  <script src="//cdn.jsdelivr.net/react/15.3.2/react.js"></script>
+  <script src="//cdn.jsdelivr.net/react/15.3.2/react-dom.js"></script>
+  <script src="${options.js}"></script>
 </head>
 <body>
+  <div id="content"></div>
   <script>
     // Collect the URL parameters
-    var parameters = {};
+    var parameters = {}
     window.location.search.substr(1).split('&').forEach(function (entry) {
-      var eq = entry.indexOf('=');
+      var eq = entry.indexOf('=')
       if (eq >= 0) {
         parameters[decodeURIComponent(entry.slice(0, eq))] =
-          decodeURIComponent(entry.slice(eq + 1));
+          decodeURIComponent(entry.slice(eq + 1))
       }
-    });
+    })
     // Produce a Location query string from a parameter object.
     function locationQuery(params) {
       return '?' + Object.keys(params).map(function (key) {
         return encodeURIComponent(key) + '=' +
-          encodeURIComponent(params[key]);
-      }).join('&');
+          encodeURIComponent(params[key])
+      }).join('&')
     }
     // Derive a fetch URL from the current URL, sans the GraphQL parameters.
     var graphqlParamNames = {
       query: true,
       variables: true,
       operationName: true
-    };
-    var otherParams = {};
+    }
+    var otherParams = {}
     for (var k in parameters) {
       if (parameters.hasOwnProperty(k) && graphqlParamNames[k] !== true) {
-        otherParams[k] = parameters[k];
+        otherParams[k] = parameters[k]
       }
     }
-    var fetchURL = ${JSON.stringify(url)} + locationQuery(otherParams);
+    var fetchURL = ${JSON.stringify(options.url)} + locationQuery(otherParams)
     // Defines a GraphQL fetcher using the fetch API.
     function graphQLFetcher(graphQLParams) {
+      let headers = {}
       return fetch(fetchURL, {
         method: 'post',
         headers: {
@@ -108,25 +122,39 @@ function renderHtml(options: Options): string {
         },
         body: JSON.stringify(graphQLParams),
         credentials: 'include',
-      }).then(function (response) {
-        return response.json();
-      });
+      }).then(function(response) {
+        for (let header of response.headers.entries()) {
+          headers[header[0]] = decodeURIComponent(header[1])
+        }
+        return response.text()
+      }).then(function(respText) {
+        try {
+          const body = JSON.parse(respText)
+          Object.defineProperty(body, '_headers', {
+            value: headers,
+            enumberable: false
+          })
+          return body
+        } catch (e) {
+          return respText
+        }
+      })
     }
     // When the query and variables string is edited, update the URL bar so
     // that it can be easily shared.
     function onEditQuery(newQuery) {
-      parameters.query = newQuery;
-      updateURL();
+      parameters.query = newQuery
+      updateURL()
     }
     function onEditVariables(newVariables) {
-      parameters.variables = newVariables;
-      updateURL();
+      parameters.variables = newVariables
+      updateURL()
     }
     function updateURL() {
-      history.replaceState(null, null, locationQuery(parameters));
+      history.replaceState(null, null, locationQuery(parameters))
     }
     // Render <GraphiQL /> into the body.
-    React.render(
+    ReactDOM.render(
       React.createElement(GraphiQL, {
         fetcher: graphQLFetcher,
         onEditQuery: onEditQuery,
@@ -135,10 +163,9 @@ function renderHtml(options: Options): string {
         response: ${JSON.stringify(resultString)},
         variables: ${JSON.stringify(variablesString)}
       }),
-      document.body
-    );
+      document.getElementById('content')
+    )
   </script>
 </body>
-</html>`
-  );
+</html>`;
 }
